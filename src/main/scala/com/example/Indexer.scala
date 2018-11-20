@@ -1,15 +1,16 @@
 package com.example
 
+import java.io.File
+
 import akka.stream._
 import akka.stream.scaladsl._
-import akka.actor.{Actor, ActorSystem, Props}
+import akka.actor.ActorSystem
 import akka.stream.scaladsl.Source
-
-import scala.concurrent.ExecutionContext
 import akka.stream.alpakka.elasticsearch._
 import akka.stream.alpakka.elasticsearch.scaladsl._
 import org.elasticsearch.client.RestClient
 import org.apache.http.HttpHost
+import org.squbs.pattern.stream.{PersistentBuffer, QueueSerializer}
 import spray.json._
 
 import scala.concurrent.duration._
@@ -42,62 +43,46 @@ object MessageJsonProtocol extends DefaultJsonProtocol {
   implicit val format: JsonFormat[Message] = jsonFormat2(Message.apply)
 }
 
-class IndexingActor(
-  queueBufferSize: Int = 5,
-  elasticsearchBufferSize: Int = 5,
-  elasticsearchMaxRetries: Int = 5,
-  elasticsearchRetryInterval: FiniteDuration = 1 second
-)
-(
-  implicit materializer: Materializer,
-  ec: ExecutionContext,
-  client: RestClient,
-  format: JsonFormat[Message]
-) extends Actor {
-
-  val stream = Source
-    .queue[Message](bufferSize = queueBufferSize, OverflowStrategy.dropBuffer)
-    .throttle(elements = queueBufferSize * 10, per = 1.seconds)
-    .map(msg => WriteMessage.createUpsertMessage(msg.id.toString, msg))
-    .toMat(
-      ElasticsearchSink.create[Message](
-        indexName = "test-1",
-        typeName = "_doc",
-        settings = ElasticsearchWriteSettings()
-            .withBufferSize(elasticsearchBufferSize)
-            .withRetryLogic(RetryAtFixedRate(elasticsearchMaxRetries, elasticsearchRetryInterval))
-
-      )
-    )(Keep.left)
-    .run()
-
-  override def receive: Receive = {
-    case msg: Message => {
-      println(s"Actor received message $msg")
-      stream.offer(msg).map {
-        case QueueOfferResult.Enqueued    ⇒ println(s"- enqueued $msg")
-        case QueueOfferResult.Dropped     ⇒ println(s"- dropped $msg")
-        case QueueOfferResult.Failure(ex) ⇒ println(s"- offer failed ${ex.getMessage}")
-        case QueueOfferResult.QueueClosed ⇒ println("- source Queue closed")
-      }
-    }
-  }
-}
-
 object Main extends App {
   import MessageJsonProtocol._
 
   val numMessages = 1000
+  val sourceBufferSize = Int.MaxValue
+  val elasticsearchBufferSize = 5
+  val elasticsearchMaxRetries = 5
+  val elasticsearchRetryInterval: FiniteDuration = 1 second
+  val elasticsearchIndexName = "test-1"
+  val elasticsearchTypeName = "_doc"
+  val throttleElements = 10
+  val throttleRate: FiniteDuration = 1 second
 
   implicit val system = ActorSystem("Indexer")
   implicit val materializer: Materializer = ActorMaterializer()
   implicit val ec = system.dispatcher
   implicit val client = RestClient.builder(new HttpHost("0.0.0.0", 9200)).build
+  implicit val serializer = QueueSerializer[Message]()
 
-  val data = Message.generate(num = numMessages)
-  val actor = system.actorOf(Props[IndexingActor](new IndexingActor()), name = "indexer")
+  val buffer = new PersistentBuffer[Message](new File("/tmp/akka-streams-indexer"))
 
-  for (d <- data.values.toList.sortBy(x => x.id)) {
-    actor ! d
+  val source = Source.actorRef[Message](sourceBufferSize, OverflowStrategy.fail)
+
+  val sink = Flow[Message]
+    .via(buffer.async)
+    .map(msg => WriteMessage.createUpsertMessage(msg.id.toString, msg))
+    .throttle(elements = throttleElements, per = throttleRate)
+    .toMat(
+      ElasticsearchSink.create[Message](
+        indexName = elasticsearchIndexName,
+        typeName = elasticsearchTypeName,
+        settings = ElasticsearchWriteSettings()
+          .withBufferSize(elasticsearchBufferSize)
+          .withRetryLogic(RetryAtFixedRate(elasticsearchMaxRetries, elasticsearchRetryInterval))
+
+      )
+    )(Keep.right)
+    .runWith(source)
+
+  for (d <- Message.generate(num = numMessages).values.toList.sortBy(x => x.id)) {
+    sink ! d
   }
 }
