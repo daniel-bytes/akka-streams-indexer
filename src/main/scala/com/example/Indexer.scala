@@ -32,11 +32,8 @@ object Message {
     Message(id, random.nextInt(maxValue).abs)
   }
 
-  def generate(num: Int): Map[Int, Message] = {
-    for (i <- 1 to num) yield {
-      i -> Message(i)
-    }
-  }.toMap
+  def generate(num: Int): Seq[Message] =
+    for (i <- 1 to num) yield Message(i)
 }
 
 object MessageJsonProtocol extends DefaultJsonProtocol {
@@ -44,8 +41,7 @@ object MessageJsonProtocol extends DefaultJsonProtocol {
 }
 
 object Main extends App {
-  import MessageJsonProtocol._
-
+  // Constants
   val numMessages = 1000
   val sourceBufferSize = Int.MaxValue
   val elasticsearchBufferSize = 5
@@ -53,16 +49,23 @@ object Main extends App {
   val elasticsearchRetryInterval: FiniteDuration = 1 second
   val elasticsearchIndexName = "test-1"
   val elasticsearchTypeName = "_doc"
+  val elasticsearchHostname = "0.0.0.0"
+  val elasticsearchPort = 9200
+  val persistentBufferFilePath = "/tmp/akka-streams-indexer"
   val throttleElements = 10
   val throttleRate: FiniteDuration = 1 second
+
+  // Implicits
+  import MessageJsonProtocol._
 
   implicit val system = ActorSystem("Indexer")
   implicit val materializer: Materializer = ActorMaterializer()
   implicit val ec = system.dispatcher
-  implicit val client = RestClient.builder(new HttpHost("0.0.0.0", 9200)).build
+  implicit val client = RestClient.builder(new HttpHost(elasticsearchHostname, elasticsearchPort)).build
   implicit val serializer = QueueSerializer[Message]()
 
-  val buffer = new PersistentBuffer[Message](new File("/tmp/akka-streams-indexer"))
+  // Stream setup
+  val buffer = new PersistentBuffer[Message](new File(persistentBufferFilePath))
 
   val source = Source.actorRef[Message](sourceBufferSize, OverflowStrategy.fail)
 
@@ -82,7 +85,8 @@ object Main extends App {
     )(Keep.right)
     .runWith(source)
 
-  for (d <- Message.generate(num = numMessages).values.toList.sortBy(x => x.id)) {
+  // Publish test data to Stream
+  for (d <- Message.generate(num = numMessages)) {
     sink ! d
   }
 }
