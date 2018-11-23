@@ -42,12 +42,16 @@ class MessageIndexer
   private implicit val client = RestClient.builder(new HttpHost(elasticsearchHostname, elasticsearchPort)).build
   private implicit val serializer = QueueSerializer[Message]()
   private val mapper = new ObjectMapper()
+  private val toggle = new ToggleState(initialState = true)
 
   val actor = Flow[Message]
     // Write incoming messages to buffer
     .map(msg => { println(s"[$msg] - Buffering"); msg })
     .via(
       new PersistentBuffer[Message](new File(persistentBufferFilePath)).async
+    )
+    .via(
+      new ToggleBackpressure[Message](toggle)
     )
 
     // Throttle incoming values (may be coming from buffer on a cold restart)
@@ -56,7 +60,7 @@ class MessageIndexer
 
     // Index to Elasticsearch
     .map(msg => { println(s"[$msg] - Indexing"); msg })
-    .map(msg => WriteMessage.createUpsertMessage(msg.id.toString, msg))
+    .map(msg => WriteMessage.createIndexMessage(msg.id.toString, msg).withVersion(msg.version))
 
     .toMat(
       ElasticsearchSink.create[Message](
@@ -65,11 +69,20 @@ class MessageIndexer
         settings = ElasticsearchWriteSettings()
           .withBufferSize(elasticsearchBufferSize)
           .withRetryLogic(RetryAtFixedRate(elasticsearchMaxRetries, elasticsearchRetryInterval))
+          .withVersionType("external")
       )
     )(Keep.left)
     .runWith(
       Source.actorRef[Message](sourceBufferSize, OverflowStrategy.fail)
     )
+
+  def suspend(): Unit = {
+    toggle.off()
+  }
+
+  def resume(): Unit = {
+    toggle.on()
+  }
 
   def publish(msg: Message): Unit = {
     actor ! msg
@@ -78,11 +91,27 @@ class MessageIndexer
   def createIndex(): String = {
     val response =  client.performRequest("GET", "/_alias")
     val aliasResponse = mapper.readTree(response.getEntity.getContent).asInstanceOf[ObjectNode]
-    println(aliasResponse.toString)
 
     val newIndex = getNextIndexName(aliasResponse)
 
     client.performRequest("PUT", newIndex)
+    newIndex
+  }
+
+  def reindex(source: String): String = {
+    val response =  client.performRequest("GET", "/_alias")
+    val aliasResponse = mapper.readTree(response.getEntity.getContent).asInstanceOf[ObjectNode]
+
+    val newIndex = getNextIndexName(aliasResponse)
+    val body = createReindexPayload(source, newIndex)
+
+    client.performRequest(
+      "POST",
+      "_reindex",
+      Map[String, String]().asJava,
+      new StringEntity(body.toString),
+      new BasicHeader("Content-Type", "application/json"))
+
     newIndex
   }
 
@@ -91,7 +120,6 @@ class MessageIndexer
 
     val response =  client.performRequest("GET", "/_alias")
     val aliasResponse = mapper.readTree(response.getEntity.getContent).asInstanceOf[ObjectNode]
-    println(aliasResponse.toString)
 
     def send(alias: String): Unit = {
       val currentIndex = getIndexWithAlias(aliasResponse, alias)
@@ -160,6 +188,23 @@ class MessageIndexer
 
     println(aliasBody.toString)
     aliasBody
+  }
+
+  private def createReindexPayload(
+    source: String,
+    dest: String
+  ): ObjectNode = {
+    val body = mapper.createObjectNode()
+
+    body
+      .putObject("source")
+      .put("index", source)
+
+    body
+      .putObject("dest")
+      .put("index", dest)
+
+    body
   }
 }
 

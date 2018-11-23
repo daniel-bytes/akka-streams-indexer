@@ -22,7 +22,7 @@ object Haikunator {
   }
 
   def haiku: String = {
-    val xs = getRandNumber(1000 to 9999) :: List(nouns, adjs).map(getRandElt)
-    xs.reverse.mkString("-")
+    //val xs = getRandNumber(1000 to 9999) :: List(nouns, adjs).map(getRandElt)
+    List(adjs, nouns).map(getRandElt).mkString("-")
   }
 }
