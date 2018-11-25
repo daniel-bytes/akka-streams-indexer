@@ -14,9 +14,10 @@ object Haikunator {
     "sequoia", "cedar", "wrath", "blessing", "spirit", "nova", "storm", "burst",
     "giant", "elemental", "throne", "game", "weed", "stone", "apogee", "bang")
 
-  def getRandElt[A](xs: List[A]): A = xs.apply(nextInt(xs.size))
+  /**
+    * Creates a new random "haiku" string
+    */
+  def haiku: String = List(adjs, nouns).map(getRandElt).mkString("-")
 
-  def haiku: String = {
-    List(adjs, nouns).map(getRandElt).mkString("-")
-  }
+  private def getRandElt[A](xs: List[A]): A = xs.apply(nextInt(xs.size))
 }
