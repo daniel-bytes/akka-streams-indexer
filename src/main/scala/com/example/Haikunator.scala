@@ -4,7 +4,6 @@ package com.example
 object Haikunator {
   import scala.util.Random.nextInt
 
-  // full dictionaries at https://github.com/bmarcot/haiku
   val adjs = List("autumn", "hidden", "bitter", "misty", "silent",
     "reckless", "daunting", "short", "rising", "strong", "timber", "tumbling",
     "silver", "dusty", "celestial", "cosmic", "crescent", "double", "far",
@@ -17,12 +16,7 @@ object Haikunator {
 
   def getRandElt[A](xs: List[A]): A = xs.apply(nextInt(xs.size))
 
-  def getRandNumber(ra: Range): String = {
-    (ra.head + nextInt(ra.end - ra.head)).toString
-  }
-
   def haiku: String = {
-    //val xs = getRandNumber(1000 to 9999) :: List(nouns, adjs).map(getRandElt)
     List(adjs, nouns).map(getRandElt).mkString("-")
   }
 }

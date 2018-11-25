@@ -16,3 +16,4 @@ libraryDependencies ++= Seq(
   "net.openhft" % "chronicle-queue" % "4.16.5"
 )
 
+fork in run := true

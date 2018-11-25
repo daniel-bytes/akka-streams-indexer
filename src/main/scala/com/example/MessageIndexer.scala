@@ -4,7 +4,7 @@ import java.io.File
 
 import akka.stream._
 import akka.stream.scaladsl._
-import akka.actor.ActorSystem
+import akka.actor.{ActorSystem, PoisonPill}
 import akka.stream.scaladsl.Source
 import akka.stream.alpakka.elasticsearch._
 import akka.stream.alpakka.elasticsearch.scaladsl._
@@ -14,6 +14,7 @@ import org.elasticsearch.client.RestClient
 import org.apache.http.HttpHost
 import org.apache.http.entity.StringEntity
 import org.apache.http.message.BasicHeader
+import org.apache.http.util.EntityUtils
 import org.squbs.pattern.stream.{PersistentBuffer, QueueSerializer}
 
 import scala.concurrent.duration._
@@ -51,7 +52,7 @@ class MessageIndexer
       new PersistentBuffer[Message](new File(persistentBufferFilePath)).async
     )
     .via(
-      new ToggleBackpressure[Message](toggle)
+      new Toggle[Message]().withAttributes(ToggleAttributes.toggleState(toggle))
     )
 
     // Throttle incoming values (may be coming from buffer on a cold restart)
@@ -93,27 +94,42 @@ class MessageIndexer
     val aliasResponse = mapper.readTree(response.getEntity.getContent).asInstanceOf[ObjectNode]
 
     val newIndex = getNextIndexName(aliasResponse)
+    val body = mapper.createObjectNode()
 
-    client.performRequest("PUT", newIndex)
+    body
+      .putObject("settings")
+      .putObject("index")
+      .put("number_of_shards", 1)
+      .put("number_of_replicas", 1)
+
+    val createIndexResponse = client.performRequest(
+      "PUT",
+      newIndex,
+      Map[String, String]().asJava,
+      new StringEntity(body.toString),
+      new BasicHeader("Content-Type", "application/json"))
+
+    println(s"create response: ${createIndexResponse.getStatusLine.getStatusCode} - ${EntityUtils.toString(createIndexResponse.getEntity)}")
+
     newIndex
   }
 
-  def reindex(source: String): String = {
-    val response =  client.performRequest("GET", "/_alias")
-    val aliasResponse = mapper.readTree(response.getEntity.getContent).asInstanceOf[ObjectNode]
+  def reindex(source: String, dest: String): String = {
+    val body = createReindexPayload(source, dest)
 
-    val newIndex = getNextIndexName(aliasResponse)
-    val body = createReindexPayload(source, newIndex)
-
-    client.performRequest(
+    val reindexResponse = client.performRequest(
       "POST",
       "_reindex",
       Map[String, String]().asJava,
       new StringEntity(body.toString),
       new BasicHeader("Content-Type", "application/json"))
 
-    newIndex
+    println(s"reindex response: ${reindexResponse.getStatusLine.getStatusCode} - ${EntityUtils.toString(reindexResponse.getEntity)}")
+
+    dest
   }
+
+  //def listIndices
 
   def setAlias(index: String, forRead: Boolean = false, forWrite: Boolean = false): Unit = {
     if (!forRead && !forWrite) return
@@ -140,6 +156,10 @@ class MessageIndexer
     if (forWrite) {
       send("test-write")
     }
+  }
+
+  def terminate(): Unit = {
+    actor ! PoisonPill
   }
 
   private def getIndexWithAlias(aliasResponse: ObjectNode, alias: String): Option[String] = {

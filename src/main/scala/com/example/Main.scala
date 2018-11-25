@@ -6,6 +6,8 @@ import scala.concurrent.Future
 import scala.util.Random
 import java.util.logging.{Level, LogManager}
 
+import scala.concurrent.duration._
+
 // Running Elasticsearch:
 // docker run -d --name elasticsearch -p 9200:9200 -p 9300:9300 -e "discovery.type=single-node" elasticsearch:6.4.2
 
@@ -29,17 +31,18 @@ object Main extends App {
   println(s"**** Indexing data to $idx")
   val publisher = publish
 
-  Thread.sleep(3000)
+  pause()
+
+  val newIdx = indexer.createIndex()
+  println(s"**** Created new index $idx")
 
   println(s"**** Suspending writes")
   indexer.suspend()
 
   println(s"**** Reindexing")
+  indexer.reindex(idx, newIdx)
 
-  val newIdx = indexer.reindex(idx)
-  println(s"**** Created new index $newIdx")
-
-  Thread.sleep(2000)
+  pause()
 
   indexer.setAlias(newIdx, forWrite = true)
   println(s"**** Set write alias for $newIdx")
@@ -47,38 +50,35 @@ object Main extends App {
   println(s"**** Resuming writes")
   indexer.resume()
 
-  Thread.sleep(2000)
+  pause()
 
   indexer.setAlias(newIdx, forRead = true, forWrite = true)
   println(s"**** Set read and write alias for $newIdx")
 
-  Thread.sleep(2000)
+  pause()
 
   println(s"**** Done publishing")
   publishing = false
+
+  pause(1 second)
+
+  println(s"**** Ending application")
   system.terminate()
-  System.exit(0)
+
+  sys.exit(0)
 
 
   /**
     * Helper Functions
     */
-
   def publish = Future {
     val random = new Random()
 
     while(publishing) {
       val idx = Math.abs(random.nextInt()) % numMessages
       val sleep = (random.nextDouble() * 1000.0).toLong
-      val doModify = Math.abs( random.nextInt() % 100 ) >= 95
 
-      if (doModify) {
-        val msg = messages(idx)
-        val version = msg.version + 1
-        val name = s"${msg.name}-$version"
-        messages(idx) = msg.copy(name = name, version = version)
-      }
-
+      messages(idx) = messages(idx).copy(version = messages(idx).version + 1)
       indexer.publish(messages(idx))
 
       Thread.sleep(sleep)
@@ -91,5 +91,10 @@ object Main extends App {
     for (h <- rootLogger.getHandlers) {
       h.setLevel(Level.SEVERE)
     }
+  }
+
+  def pause(duration: FiniteDuration = 5 seconds): Unit = {
+    println(s"**** Sleeping ${duration.toSeconds} seconds")
+    Thread.sleep(duration.toMillis)
   }
 }
